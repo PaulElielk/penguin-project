@@ -1,0 +1,50 @@
+I. REQUIREMENTS ANALYSIS AND SPECIFICATION
+
+1.  What is the problem?
+
+2.  Why is it important to solve the problem?
+
+3.  What are the possible solutions to the problem?
+
+4.  What exactly are the data input to the system and what exactly are the data output by the system?
+
+5.  What are the likely complexities that might arise while solving the problem?
+
+6.  If there are external software or hardware with which the developed software has to interface, then what exactly would the data interchange formats with the external system be?
+
+II. SOFTWARE REQUIREMENT SPECIFICATIONS
+
+1. Functional requirements
+
+1. Create default admin account with username: admin, and password: admin
+1. Create Manager Account
+1. Create agent account
+1. Create a new RDV form
+1. Display manager list
+1. Display agent list
+1. Display rdv list
+1. Delete rdv
+1. Delete team
+1. Log in
+1. Log out
+
+1. Non-functional requirements of the system: complete the list
+
+2.1. For mobile app solution
+
+Example: the mobile app should be available for iOS and Android
+
+2.2. For web app solution
+
+2.3. For desktop app solution
+
+3. Context Diagram
+
+4. Data Flow diagram for all possible levels
+
+5. Entity Relationship Diagram
+
+6. Data Dictionaries
+
+7. Goals of implementation: complete the list
+   Example: - Sanovia might want to develop a mobile version of the system in maybe 2 years.
