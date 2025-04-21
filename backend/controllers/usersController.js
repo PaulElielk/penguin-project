@@ -31,12 +31,13 @@ export const createUser = (req, res) => {
 export const loginUser = (req, res) => {
   const { user_email, user_password } = req.body;
 
-  if (!user_email || !user_password) {
-    return res.status(400).json({ error: 'Email and password are required' });
-  }
+  // Modified query to check user_account table only
+  const sql = `
+    SELECT * FROM user_account 
+    WHERE user_email = ?
+  `;
 
-  const sql = 'SELECT * FROM user_account WHERE user_email = ?';
-  db.query(sql, [user_email], (err, results) => {
+  db.query(sql, [user_email], async (err, results) => {
     if (err) {
       console.error('Database error:', err);
       return res.status(500).json({ error: 'Database error' });
@@ -47,25 +48,59 @@ export const loginUser = (req, res) => {
     }
 
     const user = results[0];
-    console.log('User fetched from database:', user);
-
-    // Compare the hashed password
-    bcrypt.compare(user_password, user.user_password, (err, isMatch) => {
-      if (err) {
-        console.error('Error comparing passwords:', err);
-        return res.status(500).json({ error: 'Error comparing passwords' });
+    try {
+      const isMatch = await bcrypt.compare(user_password, user.user_password);
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Invalid credentials' });
       }
+
+      res.status(200).json({
+        userId: user.user_id,
+        is_merchant: false // Regular users are not merchants
+      });
+    } catch (err) {
+      console.error('Error comparing passwords:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+};
+
+// Add separate merchant login endpoint
+export const loginMerchant = async (req, res) => {
+  const { merchant_email, merchant_password } = req.body;
+
+  const sql = 'SELECT * FROM merchant_account WHERE merchant_email = ?';
+
+  try {
+    db.query(sql, [merchant_email], async (err, results) => {
+      if (err) {
+        console.error('Database error:', err);
+        return res.status(500).json({ error: 'Database error' });
+      }
+
+      if (results.length === 0) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const merchant = results[0];
+      const isMatch = await bcrypt.compare(merchant_password, merchant.merchant_password);
 
       if (!isMatch) {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
       res.status(200).json({
-        message: 'Login successful',
-        userId: user.user_id,
+        merchantId: merchant.merchant_id,
+        businessName: merchant.business_name,
+        businessType: merchant.business_type,
+        phoneNumber: merchant.phone_number,
+        balance: merchant.balance
       });
     });
-  });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 };
 
 // Get all users
@@ -83,92 +118,148 @@ export const getUsers = (req, res) => {
 export const getUserById = (req, res) => {
   const { userId } = req.params;
 
-  const sql = 'SELECT fname, lname, balance FROM user_account WHERE user_id = ?';
+  const sql = `
+    SELECT u.*, 
+           IF(a.agent_id IS NOT NULL, TRUE, FALSE) as is_agent
+    FROM user_account u
+    LEFT JOIN agent_account a ON u.user_id = a.user_id
+    WHERE u.user_id = ?
+  `;
+
   db.query(sql, [userId], (err, results) => {
-    if (err || results.length === 0) {
+    if (err) {
+      console.error('Error fetching user:', err);
+      return res.status(500).json({ error: 'Error fetching user' });
+    }
+    if (results.length === 0) {
       return res.status(404).json({ error: 'User not found' });
     }
-
     res.status(200).json(results[0]);
+  });
+};
+
+// Get merchant by ID
+export const getMerchantById = (req, res) => {
+  const { merchantId } = req.params;
+  
+  const sql = 'SELECT * FROM merchant_account WHERE merchant_id = ?';
+  
+  db.query(sql, [merchantId], (err, results) => {
+    if (err) {
+      console.error('Database error:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+    
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Merchant not found' });
+    }
+    
+    const merchant = results[0];
+    // Return all necessary merchant data
+    res.status(200).json({
+      merchant_id: merchant.merchant_id,
+      business_name: merchant.business_name,
+      business_type: merchant.business_type,
+      phone_number: merchant.phone_number,
+      balance: merchant.balance,
+      merchant_email: merchant.merchant_email
+    });
   });
 };
 
 // Make a transaction
 export const makeTransaction = (req, res) => {
-  const { sender_id, receiver_id, amount } = req.body;
+  const { sender_id, receiver_id, amount, is_merchant_transaction } = req.body;
 
-  if (!sender_id || !receiver_id || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'Invalid transaction details' });
-  }
-
-  // Start transaction
-  db.beginTransaction((err) => {
+  db.beginTransaction(async (err) => {
     if (err) {
-      return res.status(500).json({ error: 'Error starting transaction' });
+      return res.status(500).json({ error: 'Transaction failed to start' });
     }
 
-    // Check sender's balance
-    const checkBalanceSql = 'SELECT balance FROM user_account WHERE user_id = ?';
-    db.query(checkBalanceSql, [sender_id], (err, results) => {
-      if (err || results.length === 0) {
-        return db.rollback(() => {
-          res.status(400).json({ error: 'Sender not found' });
-        });
+    try {
+      // Check sender balance
+      const [sender] = await db.promise().query(
+        'SELECT balance FROM user_account WHERE user_id = ?',
+        [sender_id]
+      );
+
+      if (sender[0].balance < amount) {
+        throw new Error('Insufficient balance');
       }
 
-      const senderBalance = results[0].balance;
+      // Calculate fees (0 for merchant transactions)
+      const fees = is_merchant_transaction ? 0 : amount * 0.01;
+      const receiverAmount = amount - fees;
 
-      if (senderBalance < amount) {
-        return db.rollback(() => {
-          res.status(400).json({ error: 'Insufficient balance' });
-        });
+      // Update sender balance
+      await db.promise().query(
+        'UPDATE user_account SET balance = balance - ? WHERE user_id = ?',
+        [amount, sender_id]
+      );
+
+      if (is_merchant_transaction) {
+        // Update merchant balance
+        await db.promise().query(
+          'UPDATE merchant_account SET balance = balance + ? WHERE merchant_id = ?',
+          [amount, receiver_id]
+        );
+
+        // Insert into merchant_transactions table
+        await db.promise().query(
+          `INSERT INTO merchant_transactions 
+           (merchant_id, user_id, amount, fees, transaction_date)
+           VALUES (?, ?, ?, ?, NOW())`,
+          [receiver_id, sender_id, amount, fees]
+        );
+      } else {
+        // Update receiver balance for regular user-to-user transaction
+        await db.promise().query(
+          'UPDATE user_account SET balance = balance + ? WHERE user_id = ?',
+          [receiverAmount, receiver_id]
+        );
+
+        // Insert into regular transactions table
+        await db.promise().query(
+          `INSERT INTO transactions 
+           (sender_id, receiver_id, amount, fees, receiver_amount, is_merchant_transaction)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [sender_id, receiver_id, amount, fees, receiverAmount, 0]
+        );
       }
 
-      // Deduct amount from sender
-      const updateSenderSql = 'UPDATE user_account SET balance = balance - ? WHERE user_id = ?';
-      db.query(updateSenderSql, [amount, sender_id], (err) => {
+      db.commit((err) => {
         if (err) {
           return db.rollback(() => {
-            res.status(500).json({ error: 'Error updating sender balance' });
+            res.status(500).json({ error: 'Failed to commit transaction' });
           });
         }
-
-        // Add amount to receiver
-        const updateReceiverSql = 'UPDATE user_account SET balance = balance + ? WHERE user_id = ?';
-        db.query(updateReceiverSql, [amount, receiver_id], (err) => {
-          if (err) {
-            return db.rollback(() => {
-              res.status(500).json({ error: 'Error updating receiver balance' });
-            });
-          }
-
-          // Commit transaction
-          db.commit((err) => {
-            if (err) {
-              return db.rollback(() => {
-                res.status(500).json({ error: 'Error committing transaction' });
-              });
-            }
-
-            res.status(200).json({ message: 'Transaction successful' });
-          });
+        res.status(200).json({ 
+          message: 'Transaction successful',
+          amount: amount,
+          fees: fees,
+          is_merchant: is_merchant_transaction
         });
       });
-    });
+    } catch (error) {
+      return db.rollback(() => {
+        res.status(400).json({ error: error.message });
+      });
+    }
   });
 };
 
 // Search user by phone number
 export const searchUserByPhone = (req, res) => {
   const { phone_number } = req.query;
+  const { sender_id } = req.query; // Add this parameter
 
   if (!phone_number) {
     return res.status(400).json({ error: 'Phone number is required' });
   }
 
-  const sql = 'SELECT user_id, fname, lname, phone_number FROM user_account WHERE phone_number = ?';
+  const sql = 'SELECT user_id, fname, lname, phone_number FROM user_account WHERE phone_number = ? AND user_id != ?';
   
-  db.query(sql, [phone_number], (err, results) => {
+  db.query(sql, [phone_number, sender_id], (err, results) => {
     if (err) {
       console.error('Database error:', err);
       return res.status(500).json({ error: 'Error searching user' });
@@ -179,5 +270,253 @@ export const searchUserByPhone = (req, res) => {
     }
     
     res.status(200).json(results[0]);
+  });
+};
+
+// Get user transactions
+export const getUserTransactions = (req, res) => {
+  const { userId } = req.params;
+  
+  const sql = `
+    SELECT 
+      t.*,
+      CASE
+        WHEN t.sender_id = ? THEN 'sent'
+        ELSE 'received'
+      END as direction,
+      u_s.fname as sender_fname,
+      u_s.lname as sender_lname,
+      u_r.fname as receiver_fname,
+      u_r.lname as receiver_lname,
+      m.business_name,
+      m.business_type,
+      m.phone_number as merchant_phone,
+      CASE
+        WHEN m.merchant_id IS NOT NULL THEN 1
+        ELSE 0
+      END as is_merchant
+    FROM transactions t
+    LEFT JOIN user_account u_s ON t.sender_id = u_s.user_id
+    LEFT JOIN user_account u_r ON t.receiver_id = u_r.user_id
+    LEFT JOIN merchant_account m ON (t.sender_id = m.merchant_id OR t.receiver_id = m.merchant_id)
+    WHERE t.sender_id = ? OR t.receiver_id = ?
+    ORDER BY t.transaction_date DESC`;
+
+  db.query(sql, [userId, userId, userId], (err, results) => {
+    if (err) {
+      console.error('Error fetching transactions:', err);
+      return res.status(500).json({ error: 'Error fetching transactions' });
+    }
+    
+    const transformedResults = results.map(transaction => {
+      const isMerchant = transaction.is_merchant === 1;
+      let otherPartyName;
+
+      if (isMerchant) {
+        otherPartyName = transaction.business_name;
+      } else {
+        otherPartyName = transaction.direction === 'sent'
+          ? `${transaction.receiver_fname} ${transaction.receiver_lname}`.trim()
+          : `${transaction.sender_fname} ${transaction.sender_lname}`.trim();
+      }
+
+      return {
+        ...transaction,
+        other_party_name: otherPartyName || 'Unknown',
+        business_type: isMerchant ? transaction.business_type : null,
+        other_party_phone: isMerchant ? transaction.merchant_phone : 
+          (transaction.direction === 'sent' ? transaction.receiver_phone : transaction.sender_phone)
+      };
+    });
+
+    res.status(200).json(transformedResults);
+  });
+};
+
+// Add this new function to usersController.js
+export const getMerchantTransactions = (req, res) => {
+  const { userId } = req.params;
+  
+  const sql = `
+    SELECT 
+      mt.*,
+      'sent' as direction,
+      u.fname as sender_fname,
+      u.lname as sender_lname,
+      u.phone_number as sender_phone,
+      m.business_name,
+      m.phone_number as merchant_phone,
+      m.business_type,
+      m.merchant_id
+    FROM merchant_transactions mt
+    INNER JOIN user_account u ON mt.user_id = u.user_id
+    INNER JOIN merchant_account m ON mt.merchant_id = m.merchant_id
+    WHERE mt.user_id = ?
+    ORDER BY mt.transaction_date DESC
+  `;
+
+  db.query(sql, [userId], (err, results) => {
+    if (err) {
+      console.error('Error fetching merchant transactions:', err);
+      return res.status(500).json({ error: 'Error fetching merchant transactions' });
+    }
+    
+    const transformedResults = results.map(transaction => ({
+      id: transaction.id,
+      amount: transaction.amount,
+      fees: transaction.fees,
+      transaction_date: transaction.transaction_date,
+      direction: 'sent', // Always sent from user to merchant
+      sender: {
+        id: transaction.user_id,
+        name: `${transaction.sender_fname} ${transaction.sender_lname}`,
+        phone: transaction.sender_phone
+      },
+      merchant: {
+        id: transaction.merchant_id,
+        business_name: transaction.business_name,
+        business_type: transaction.business_type,
+        phone: transaction.merchant_phone
+      },
+      transaction_type: 'merchant_payment'
+    }));
+
+    res.status(200).json(transformedResults);
+  });
+};
+
+// Get user profile
+export const getUserProfile = (req, res) => {
+  const { userId } = req.params;
+  const sql = 'SELECT fname, lname, phone_number FROM user_account WHERE user_id = ?';
+  
+  db.query(sql, [userId], (err, results) => {
+    if (err || results.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.status(200).json(results[0]);
+  });
+};
+
+// Update user profile
+export const updateUserProfile = (req, res) => {
+  const { userId } = req.params;
+  const { fname, lname, phone_number } = req.body;
+
+  const sql = `
+    UPDATE user_account 
+    SET fname = ?, lname = ?, phone_number = ?
+    WHERE user_id = ?
+  `;
+
+  db.query(sql, [fname, lname, phone_number, userId], (err, result) => {
+    if (err) {
+      console.error('Error updating user:', err);
+      return res.status(500).json({ error: 'Error updating profile' });
+    }
+    res.status(200).json({ message: 'Profile updated successfully' });
+  });
+};
+
+// Update user password
+export const updateUserPassword = (req, res) => {
+  const { userId } = req.params;
+  const { current_password, new_password } = req.body;
+
+  // First verify current password
+  const checkPasswordSql = 'SELECT user_password FROM user_account WHERE user_id = ?';
+  db.query(checkPasswordSql, [userId], (err, results) => {
+    if (err || results.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    bcrypt.compare(current_password, results[0].user_password, (err, isMatch) => {
+      if (err || !isMatch) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+
+      // Hash new password
+      bcrypt.hash(new_password, 10, (err, hash) => {
+        if (err) {
+          return res.status(500).json({ error: 'Error hashing new password' });
+        }
+
+        // Update password
+        const updatePasswordSql = 'UPDATE user_account SET user_password = ? WHERE user_id = ?';
+        db.query(updatePasswordSql, [hash, userId], (err, result) => {
+          if (err) {
+            return res.status(500).json({ error: 'Error updating password' });
+          }
+          res.status(200).json({ message: 'Password updated successfully' });
+        });
+      });
+    });
+  });
+};
+
+export const validateMerchantQR = (req, res) => {
+  const { merchantId } = req.params;
+  
+  const sql = `
+    SELECT 
+      merchant_id,
+      business_name,
+      business_type,
+      phone_number,
+      status
+    FROM merchant_account 
+    WHERE merchant_id = ? AND status = 'Active'`;
+
+  db.query(sql, [merchantId], (err, results) => {
+    if (err) {
+      console.error('Error validating merchant:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'Merchant not found or inactive' });
+    }
+
+    res.status(200).json({
+      merchant_id: results[0].merchant_id,
+      business_name: results[0].business_name,
+      business_type: results[0].business_type,
+      phone_number: results[0].phone_number
+    });
+  });
+};
+
+// Add this new function
+export const validateUserQR = (req, res) => {
+  const { userId } = req.params;
+  
+  const sql = `
+    SELECT 
+      u.user_id,
+      u.fname,
+      u.lname,
+      u.phone_number,
+      IF(a.agent_id IS NOT NULL, TRUE, FALSE) as is_agent
+    FROM user_account u
+    LEFT JOIN agent_account a ON u.user_id = a.user_id
+    WHERE u.user_id = ?`;
+
+  db.query(sql, [userId], (err, results) => {
+    if (err) {
+      console.error('Error validating user:', err);
+      return res.status(500).json({ error: 'Database error' });
+    }
+
+    if (results.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.status(200).json({
+      user_id: results[0].user_id,
+      fname: results[0].fname,
+      lname: results[0].lname,
+      phone_number: results[0].phone_number,
+      is_agent: results[0].is_agent
+    });
   });
 };

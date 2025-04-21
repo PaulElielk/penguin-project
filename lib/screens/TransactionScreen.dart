@@ -7,8 +7,9 @@ import 'dart:async';
 
 class TransactionScreen extends StatefulWidget {
   final int senderId;
+  final Map<String, dynamic>? qrData;
 
-  TransactionScreen({required this.senderId});
+  TransactionScreen({required this.senderId, this.qrData});
 
   @override
   _TransactionScreenState createState() => _TransactionScreenState();
@@ -16,73 +17,116 @@ class TransactionScreen extends StatefulWidget {
 
 class _TransactionScreenState extends State<TransactionScreen> {
   final TextEditingController phoneController = TextEditingController();
-  final TextEditingController amountController = TextEditingController();
+  final TextEditingController amountSendController = TextEditingController();
+  final TextEditingController amountReceiveController = TextEditingController();
 
   Map<String, dynamic>? receiverData;
   bool isSearching = false;
+  bool isReceiverAgent = false;
+  bool isSenderAgent = false;
 
   Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
-    // Add listener to phone controller
     phoneController.addListener(_onPhoneNumberChanged);
+    _checkSenderAgentStatus();
+
+    // If QR data is provided, pre-fill the phone number and search for receiver
+    if (widget.qrData != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final phoneNumber = widget.qrData!['phoneNumber'];
+        if (phoneNumber != null) {
+          phoneController.text = phoneNumber;
+          searchReceiver(phoneNumber);
+        }
+      });
+    }
   }
 
   @override
   void dispose() {
-    // Remove listener when disposing
-    phoneController.removeListener(_onPhoneNumberChanged);
     phoneController.dispose();
-    amountController.dispose();
+    amountSendController.dispose();
+    amountReceiveController.dispose();
     super.dispose();
   }
 
   void _onPhoneNumberChanged() {
-    // Cancel previous timer if it exists
     if (_debounce?.isActive ?? false) _debounce!.cancel();
 
-    // Set new timer
     _debounce = Timer(Duration(milliseconds: 500), () {
       final phoneNumber = phoneController.text;
       if (phoneNumber.length >= 10) {
-        // Only search if number is long enough
         searchReceiver(phoneNumber);
       }
     });
+  }
+
+  Future<void> _checkSenderAgentStatus() async {
+    try {
+      final response = await http.get(
+        Uri.parse('${Config.apiUrl}/users/${widget.senderId}'),
+        headers: {'Content-Type': 'application/json'},
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          isSenderAgent = data['is_agent'] == 1 || data['is_agent'] == true;
+        });
+      }
+    } catch (e) {
+      print('Error checking sender agent status: $e');
+    }
   }
 
   Future<void> searchReceiver(String phoneNumber) async {
     setState(() {
       isSearching = true;
       receiverData = null;
+      isReceiverAgent = false;
     });
 
     try {
       final response = await http.get(
-        Uri.parse('${Config.apiUrl}/users/search?phone_number=$phoneNumber'),
+        Uri.parse(
+          '${Config.apiUrl}/users/search?phone_number=$phoneNumber&sender_id=${widget.senderId}',
+        ),
         headers: {'Content-Type': 'application/json'},
       );
 
-      print('Response status: ${response.statusCode}');
-      print('Response body: ${response.body}');
-
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        setState(() {
-          receiverData = data;
-        });
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('User not found')),
+
+        final agentCheckResponse = await http.get(
+          Uri.parse('${Config.apiUrl}/users/${data['user_id']}'),
+          headers: {'Content-Type': 'application/json'},
         );
+
+        if (agentCheckResponse.statusCode == 200) {
+          final agentData = jsonDecode(agentCheckResponse.body);
+          setState(() {
+            receiverData = data;
+            isReceiverAgent =
+                agentData['is_agent'] == 1 || agentData['is_agent'] == true;
+          });
+
+          if (amountSendController.text.isNotEmpty) {
+            _updateAmounts(amountSendController.text, true);
+          }
+        }
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('User not found')));
       }
     } catch (e) {
       print('Error searching user: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error searching user: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error searching user: $e')));
     } finally {
       setState(() {
         isSearching = false;
@@ -91,26 +135,63 @@ class _TransactionScreenState extends State<TransactionScreen> {
   }
 
   Future<void> makeTransaction() async {
-    if (amountController.text.isEmpty) {
+    if (receiverData!['user_id'] == widget.senderId) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Please enter an amount')),
+        SnackBar(
+          content: Text('You cannot send money to yourself'),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
 
+    if (amountSendController.text.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Please enter an amount')));
+      return;
+    }
+
     try {
-      final amount = double.parse(amountController.text);
+      final amount = double.parse(amountSendController.text);
       if (amount <= 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Please enter a valid amount')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Please enter a valid amount')));
         return;
       }
 
-      print('Sending transaction:');
-      print('Sender ID: ${widget.senderId}');
-      print('Receiver ID: ${receiverData!['user_id']}');
-      print('Amount: $amount');
+      final fees = (isSenderAgent || isReceiverAgent) ? 0 : amount * 0.01;
+      final receiveAmount = amount - fees;
+
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder:
+            (context) => AlertDialog(
+              title: Text('Confirm Transaction'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Amount to Send: \$${amount.toStringAsFixed(2)}'),
+                  Text('Fees: \$${fees.toStringAsFixed(2)}'),
+                  Text('Receiver Gets: \$${receiveAmount.toStringAsFixed(2)}'),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: Text('Proceed'),
+                ),
+              ],
+            ),
+      );
+
+      if (proceed != true) return;
 
       final response = await http.post(
         Uri.parse('${Config.apiUrl}/users/transaction'),
@@ -122,19 +203,24 @@ class _TransactionScreenState extends State<TransactionScreen> {
         }),
       );
 
-      print('Response status: ${response.statusCode}');
-      print('Response body: ${response.body}');
-
       if (response.statusCode == 200) {
+        final responseData = jsonDecode(response.body);
+        final amount = double.parse(amountSendController.text);
+        final receiverName =
+            '${receiverData!['fname']} ${receiverData!['lname']}';
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Transaction successful'),
+            content: Text(
+              'Transaction successful!\n'
+              'Sent \$${amount.toStringAsFixed(2)} to $receiverName',
+            ),
             backgroundColor: Colors.green,
+            duration: Duration(seconds: 3),
           ),
         );
 
-        await Future.delayed(Duration(seconds: 1));
-
+        await Future.delayed(Duration(seconds: 2));
         Navigator.pushNamedAndRemoveUntil(
           context,
           '/dashboard',
@@ -145,8 +231,7 @@ class _TransactionScreenState extends State<TransactionScreen> {
         final errorData = jsonDecode(response.body);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-                'Transaction failed: ${errorData['error'] ?? 'Unknown error'}'),
+            content: Text('Transaction failed: ${errorData['error']}'),
             backgroundColor: Colors.red,
           ),
         );
@@ -164,77 +249,101 @@ class _TransactionScreenState extends State<TransactionScreen> {
 
   Future<void> pickContact() async {
     try {
-      // Request permission
       if (!await FlutterContacts.requestPermission(readonly: true)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Permission denied')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Permission denied')));
         return;
       }
 
-      // Get all contacts
       final contacts = await FlutterContacts.getContacts(
         withProperties: true,
         withPhoto: false,
       );
 
       if (contacts.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('No contacts found')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('No contacts found')));
         return;
       }
 
-      // Show contact picker dialog
       showDialog(
         context: context,
-        builder: (context) => AlertDialog(
-          title: Text('Select Contact'),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 300,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: contacts.length,
-              itemBuilder: (context, i) {
-                final contact = contacts[i];
-                return ListTile(
-                  title: Text(contact.displayName),
-                  subtitle: Text(contact.phones.isNotEmpty
-                      ? contact.phones.first.number
-                      : 'No number'),
-                  onTap: () async {
-                    // Make onTap async
-                    if (contact.phones.isNotEmpty) {
-                      String phoneNumber = contact.phones.first.number;
-                      // Remove any spaces or special characters
-                      phoneNumber =
-                          phoneNumber.replaceAll(RegExp(r'[^\d]'), '');
+        builder:
+            (context) => AlertDialog(
+              title: Text('Select Contact'),
+              content: SizedBox(
+                width: double.maxFinite,
+                height: 300,
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: contacts.length,
+                  itemBuilder: (context, i) {
+                    final contact = contacts[i];
+                    return ListTile(
+                      title: Text(contact.displayName),
+                      subtitle: Text(
+                        contact.phones.isNotEmpty
+                            ? contact.phones.first.number
+                            : 'No number',
+                      ),
+                      onTap: () async {
+                        if (contact.phones.isNotEmpty) {
+                          String phoneNumber = contact.phones.first.number;
+                          phoneNumber = phoneNumber.replaceAll(
+                            RegExp(r'[^\d]'),
+                            '',
+                          );
 
-                      setState(() {
-                        phoneController.text = phoneNumber;
-                      });
+                          setState(() {
+                            phoneController.text = phoneNumber;
+                          });
 
-                      Navigator.pop(context); // Close dialog first
+                          Navigator.pop(context);
 
-                      // Wait a brief moment before searching
-                      await Future.delayed(Duration(milliseconds: 100));
+                          await Future.delayed(Duration(milliseconds: 100));
 
-                      // Search for the receiver after dialog is closed
-                      await searchReceiver(phoneNumber);
-                    }
+                          await searchReceiver(phoneNumber);
+                        }
+                      },
+                    );
                   },
-                );
-              },
+                ),
+              ),
             ),
-          ),
-        ),
       );
     } catch (e) {
       print('Error picking contact: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error accessing contacts: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error accessing contacts: $e')));
+    }
+  }
+
+  void _updateAmounts(String value, bool isFromSendField) {
+    if (value.isEmpty) {
+      amountSendController.text = '';
+      amountReceiveController.text = '';
+      return;
+    }
+
+    try {
+      double amount = double.parse(value);
+      if (isFromSendField) {
+        double fees = (isSenderAgent || isReceiverAgent) ? 0 : amount * 0.01;
+        double receiveAmount = amount - fees;
+        amountReceiveController.text = receiveAmount.toStringAsFixed(2);
+      } else {
+        if (isSenderAgent || isReceiverAgent) {
+          amountSendController.text = amount.toStringAsFixed(2);
+        } else {
+          double sendAmount = amount / 0.99;
+          amountSendController.text = sendAmount.toStringAsFixed(2);
+        }
+      }
+    } catch (e) {
+      print('Error parsing amount: $e');
     }
   }
 
@@ -247,7 +356,6 @@ class _TransactionScreenState extends State<TransactionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Updated phone number field with contact picker
             TextField(
               controller: phoneController,
               decoration: InputDecoration(
@@ -261,7 +369,6 @@ class _TransactionScreenState extends State<TransactionScreen> {
                       onPressed: pickContact,
                       tooltip: 'Pick from contacts',
                     ),
-                    // Remove the search button since search is now automatic
                   ],
                 ),
               ),
@@ -269,7 +376,6 @@ class _TransactionScreenState extends State<TransactionScreen> {
             ),
             SizedBox(height: 20),
 
-            // Receiver information card
             if (isSearching)
               Center(child: CircularProgressIndicator())
             else if (receiverData != null)
@@ -289,41 +395,82 @@ class _TransactionScreenState extends State<TransactionScreen> {
                       ),
                       SizedBox(height: 8),
                       Text(
-                          'Name: ${receiverData!['fname']} ${receiverData!['lname']}'),
+                        'Name: ${receiverData!['fname']} ${receiverData!['lname']}',
+                      ),
                       Text('Phone: ${receiverData!['phone_number']}'),
+                      if (isReceiverAgent)
+                        Text(
+                          'Agent Account (No fees apply)',
+                          style: TextStyle(color: Colors.green),
+                        ),
                     ],
                   ),
                 ),
               ),
             SizedBox(height: 20),
 
-            // Amount input field
-            TextField(
-              controller: amountController,
-              decoration: InputDecoration(
-                labelText: 'Amount',
-                border: OutlineInputBorder(),
-                prefixText: '\$ ',
+            if (!isSenderAgent && !isReceiverAgent) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: amountSendController,
+                      decoration: InputDecoration(
+                        labelText: 'Amount to Send',
+                        border: OutlineInputBorder(),
+                        prefixText: '\$ ',
+                        helperText: 'Including 1% fees',
+                      ),
+                      keyboardType: TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      onChanged: (value) => _updateAmounts(value, true),
+                    ),
+                  ),
+                  SizedBox(width: 16),
+                  Expanded(
+                    child: TextField(
+                      controller: amountReceiveController,
+                      decoration: InputDecoration(
+                        labelText: 'Amount to Receive',
+                        border: OutlineInputBorder(),
+                        prefixText: '\$ ',
+                        helperText: 'After 1% fees',
+                      ),
+                      keyboardType: TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      onChanged: (value) => _updateAmounts(value, false),
+                    ),
+                  ),
+                ],
               ),
-              keyboardType: TextInputType.numberWithOptions(decimal: true),
-            ),
-            SizedBox(height: 20),
+            ] else ...[
+              TextField(
+                controller: amountSendController,
+                decoration: InputDecoration(
+                  labelText: 'Amount',
+                  border: OutlineInputBorder(),
+                  prefixText: '\$ ',
+                  helperText: 'No fees apply',
+                ),
+                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                onChanged: (value) {
+                  amountReceiveController.text = value;
+                },
+              ),
+            ],
 
-            // Send button
+            SizedBox(height: 20),
             ElevatedButton(
-              onPressed: receiverData != null
-                  ? makeTransaction
-                  : null, // Remove amountController.text.isNotEmpty check
+              onPressed: receiverData != null ? makeTransaction : null,
               style: ElevatedButton.styleFrom(
                 padding: EdgeInsets.symmetric(vertical: 16),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              child: Text(
-                'Send Money',
-                style: TextStyle(fontSize: 18),
-              ),
+              child: Text('Send Money', style: TextStyle(fontSize: 18)),
             ),
           ],
         ),
