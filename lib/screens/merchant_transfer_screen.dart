@@ -49,24 +49,33 @@ class _MerchantTransferScreenState extends State<MerchantTransferScreen> {
     setState(() => _isLoading = true);
 
     try {
-      print(
-        'Making transfer with merchantId: ${widget.merchantId}',
-      ); // Debug log
+      print('Making transfer with merchantId: ${widget.merchantId}');
       final response = await http.post(
         Uri.parse('${Config.apiUrl}/users/transaction'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'sender_id': widget.senderId,
-          'receiver_id': widget.merchantId, // Make sure this is the merchant_id
+          'receiver_id': widget.merchantId,
           'amount': double.parse(_amountController.text),
-          'is_merchant_transaction':
-              true, // Updated to match backend expectation
+          'is_merchant_transaction': true,
           'business_name': widget.businessName,
+          'merchant_data': {
+            'businessName': widget.businessName,
+            'phoneNumber': widget.phoneNumber,
+          },
         }),
       );
 
       if (response.statusCode == 200) {
-        Navigator.pop(context, true);
+        if (!mounted) return;
+
+        Navigator.pushNamedAndRemoveUntil(
+          context,
+          '/dashboard',
+          (route) => false,
+          arguments: {'userId': widget.senderId},
+        );
+
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Payment successful')));
@@ -75,12 +84,16 @@ class _MerchantTransferScreenState extends State<MerchantTransferScreen> {
         throw Exception(errorData['error'] ?? 'Transfer failed');
       }
     } catch (e) {
-      print('Transfer error: $e'); // Debug log
+      print('Transfer error: $e');
+      if (!mounted) return;
+
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Transfer failed: $e')));
     } finally {
-      setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 

@@ -177,6 +177,18 @@ export const makeTransaction = (req, res) => {
     }
 
     try {
+      // Check if receiver is an agent
+      const [agentCheck] = await db.promise().query(
+        'SELECT * FROM agent_account WHERE user_id = ?',
+        [receiver_id]
+      );
+      
+      const isAgentTransaction = agentCheck.length > 0;
+      
+      // Calculate fees (0 for merchant and agent transactions)
+      const fees = (is_merchant_transaction || isAgentTransaction) ? 0 : amount * 0.01;
+      const receiverAmount = amount - fees;
+
       // Check sender balance
       const [sender] = await db.promise().query(
         'SELECT balance FROM user_account WHERE user_id = ?',
@@ -186,10 +198,6 @@ export const makeTransaction = (req, res) => {
       if (sender[0].balance < amount) {
         throw new Error('Insufficient balance');
       }
-
-      // Calculate fees (0 for merchant transactions)
-      const fees = is_merchant_transaction ? 0 : amount * 0.01;
-      const receiverAmount = amount - fees;
 
       // Update sender balance
       await db.promise().query(
@@ -204,12 +212,12 @@ export const makeTransaction = (req, res) => {
           [amount, receiver_id]
         );
 
-        // Insert into merchant_transactions table
+        // Insert into merchant_transactions table with status
         await db.promise().query(
           `INSERT INTO merchant_transactions 
-           (merchant_id, user_id, amount, fees, transaction_date)
-           VALUES (?, ?, ?, ?, NOW())`,
-          [receiver_id, sender_id, amount, fees]
+           (merchant_id, user_id, amount, fees, transaction_date, status)
+           VALUES (?, ?, ?, ?, NOW(), 'completed')`,
+          [receiver_id, sender_id, amount, 0]  // Set fees to 0 for merchant transactions
         );
       } else {
         // Update receiver balance for regular user-to-user transaction
@@ -223,7 +231,7 @@ export const makeTransaction = (req, res) => {
           `INSERT INTO transactions 
            (sender_id, receiver_id, amount, fees, receiver_amount, is_merchant_transaction)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          [sender_id, receiver_id, amount, fees, receiverAmount, 0]
+          [sender_id, receiver_id, amount, fees, receiverAmount, is_merchant_transaction]
         );
       }
 
@@ -287,18 +295,33 @@ export const getUserTransactions = (req, res) => {
       u_s.fname as sender_fname,
       u_s.lname as sender_lname,
       u_r.fname as receiver_fname,
-      u_r.lname as receiver_lname,
-      m.business_name,
-      m.business_type,
-      m.phone_number as merchant_phone,
-      CASE
-        WHEN m.merchant_id IS NOT NULL THEN 1
-        ELSE 0
-      END as is_merchant
-    FROM transactions t
+      u_r.lname as receiver_lname
+    FROM (
+      SELECT 
+        id,
+        sender_id,
+        receiver_id,
+        amount,
+        fees,
+        receiver_amount,
+        transaction_date,
+        is_merchant_transaction
+      FROM transactions
+      UNION ALL
+      SELECT 
+        id,
+        user_id as sender_id,
+        merchant_id as receiver_id,
+        amount,
+        fees,
+        amount as receiver_amount,
+        transaction_date,
+        1 as is_merchant_transaction
+      FROM merchant_transactions
+    ) t
     LEFT JOIN user_account u_s ON t.sender_id = u_s.user_id
     LEFT JOIN user_account u_r ON t.receiver_id = u_r.user_id
-    LEFT JOIN merchant_account m ON (t.sender_id = m.merchant_id OR t.receiver_id = m.merchant_id)
+    LEFT JOIN merchant_account m ON t.is_merchant_transaction = 1 AND t.receiver_id = m.merchant_id
     WHERE t.sender_id = ? OR t.receiver_id = ?
     ORDER BY t.transaction_date DESC`;
 
@@ -308,26 +331,15 @@ export const getUserTransactions = (req, res) => {
       return res.status(500).json({ error: 'Error fetching transactions' });
     }
     
-    const transformedResults = results.map(transaction => {
-      const isMerchant = transaction.is_merchant === 1;
-      let otherPartyName;
-
-      if (isMerchant) {
-        otherPartyName = transaction.business_name;
-      } else {
-        otherPartyName = transaction.direction === 'sent'
-          ? `${transaction.receiver_fname} ${transaction.receiver_lname}`.trim()
-          : `${transaction.sender_fname} ${transaction.sender_lname}`.trim();
-      }
-
-      return {
-        ...transaction,
-        other_party_name: otherPartyName || 'Unknown',
-        business_type: isMerchant ? transaction.business_type : null,
-        other_party_phone: isMerchant ? transaction.merchant_phone : 
-          (transaction.direction === 'sent' ? transaction.receiver_phone : transaction.sender_phone)
-      };
-    });
+    const transformedResults = results.map(transaction => ({
+      ...transaction,
+      fees: transaction.is_merchant_transaction ? 0 : transaction.fees,
+      other_party_name: transaction.is_merchant_transaction ? 
+        transaction.business_name : 
+        (transaction.direction === 'sent' ? 
+          `${transaction.receiver_fname} ${transaction.receiver_lname}` : 
+          `${transaction.sender_fname} ${transaction.sender_lname}`)
+    }));
 
     res.status(200).json(transformedResults);
   });
@@ -490,6 +502,12 @@ export const validateMerchantQR = (req, res) => {
 export const validateUserQR = (req, res) => {
   const { userId } = req.params;
   
+  // Add type check
+  const qrData = req.body;
+  if (qrData.type !== 'user') {
+    return res.status(400).json({ error: 'Invalid QR code type' });
+  }
+  
   const sql = `
     SELECT 
       u.user_id,
@@ -511,12 +529,20 @@ export const validateUserQR = (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Verify QR data matches database
+    const user = results[0];
+    if (user.fname !== qrData.fname || 
+        user.lname !== qrData.lname || 
+        user.phone_number !== qrData.phoneNumber) {
+      return res.status(400).json({ error: 'Invalid QR code data' });
+    }
+
     res.status(200).json({
-      user_id: results[0].user_id,
-      fname: results[0].fname,
-      lname: results[0].lname,
-      phone_number: results[0].phone_number,
-      is_agent: results[0].is_agent
+      user_id: user.user_id,
+      fname: user.fname,
+      lname: user.lname,
+      phone_number: user.phone_number,
+      is_agent: user.is_agent
     });
   });
 };

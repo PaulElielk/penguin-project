@@ -61,8 +61,32 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
         return;
       }
 
-      // Handle other QR code types here
-      print('QR code not recognized or missing required fields');
+      // Handle user QR code
+      if (qrData['type'] == 'user' &&
+          qrData.containsKey('userId') &&
+          qrData.containsKey('fname') &&
+          qrData.containsKey('lname') &&
+          qrData.containsKey('phoneNumber')) {
+        print('Processing user QR code...');
+        if (mounted) {
+          await Navigator.pushReplacementNamed(
+            context,
+            '/transfer',
+            arguments: {
+              'userId': widget.senderId,
+              'receiverId': int.parse(qrData['userId'].toString()),
+              'receiverName': '${qrData['fname']} ${qrData['lname']}',
+              'phoneNumber': qrData['phoneNumber'],
+              'isAgent': false,
+              'fromQR': true,
+            },
+          );
+        }
+        return;
+      }
+
+      // If we get here, the QR code format wasn't recognized
+      print('QR code not recognized: ${qrData.toString()}');
       if (mounted) {
         ScaffoldMessenger.of(
           context,

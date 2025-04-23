@@ -29,7 +29,7 @@ router.get('/:userId/transactions', getUserTransactions);
 router.get('/:userId/profile', getUserProfile);
 router.put('/:userId/profile', updateUserProfile);
 router.put('/:userId/password', updateUserPassword);
-router.get('/validate-qr/:userId', validateUserQR);
+router.post('/validate-qr/:userId', validateUserQR);
 
 // Merchant routes
 router.post('/merchants/login', loginMerchant);

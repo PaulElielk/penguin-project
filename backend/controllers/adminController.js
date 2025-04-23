@@ -387,30 +387,22 @@ export const deleteUser = async (req, res) => {
   }
 
   try {
-    const sql = 'DELETE FROM user_account WHERE user_id = ?';
+    const sql = 'UPDATE user_account SET status = "inactive" WHERE user_id = ?';
     
-    db.query(sql, [id], (err, result) => {
-      if (err) {
-        console.error('Error deleting user:', err);
-        return res.status(500).json({ 
-          error: 'Error deleting user',
-          details: err.message 
-        });
-      }
-      
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-      
-      res.status(200).json({ 
-        message: 'User deleted successfully',
-        userId: id 
-      });
+    const [result] = await db.promise().query(sql, [id]);
+    
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.status(200).json({ 
+      message: 'User deactivated successfully',
+      userId: id 
     });
   } catch (err) {
     console.error('Error in delete user:', err);
     res.status(500).json({ 
-      error: 'Internal server error',
+      error: 'Error deactivating user',
       details: err.message 
     });
   }

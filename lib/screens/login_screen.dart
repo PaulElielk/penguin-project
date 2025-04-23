@@ -12,6 +12,25 @@ class _LoginScreenState extends State<LoginScreen> {
   final emailController = TextEditingController();
   final passwordController = TextEditingController();
 
+  int _tapCount = 0;
+  DateTime? _lastTapTime;
+
+  void _handleAdminAccess() {
+    final now = DateTime.now();
+    if (_lastTapTime != null &&
+        now.difference(_lastTapTime!) > Duration(seconds: 2)) {
+      _tapCount = 1;
+    } else {
+      _tapCount++;
+    }
+    _lastTapTime = now;
+
+    if (_tapCount >= 5) {
+      _tapCount = 0;
+      Navigator.pushNamed(context, '/admin-panel');
+    }
+  }
+
   Future<void> _login(BuildContext context) async {
     try {
       final response = await http.post(
@@ -53,6 +72,17 @@ class _LoginScreenState extends State<LoginScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Logo or title area that can be tapped for admin access
+            GestureDetector(
+              onTap: _handleAdminAccess,
+              child: Padding(
+                padding: EdgeInsets.only(bottom: 32.0),
+                child: Text(
+                  'Money Transfer',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ),
             TextField(
               controller: emailController,
               decoration: InputDecoration(labelText: 'Email'),
